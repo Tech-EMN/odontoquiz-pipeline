@@ -24,9 +24,9 @@ from ..models.schemas import (
     QuestaoExtraida,
     Alternativa,
 )
-from .supabase import get_supabase
-from .openai_client import get_openai
-from .odontoquiz_api import get_odontoquiz_api
+from ..services.supabase import get_supabase
+from ..services.openai_client import get_openai
+from ..services.odontoquiz_api import get_odontoquiz_api
 
 logger = logging.getLogger(__name__)
 

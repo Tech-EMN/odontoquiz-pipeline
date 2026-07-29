@@ -21,6 +21,7 @@ class Settings(BaseSettings):
 
     # -- OpenAI --
     openai_api_key: str = ""
+    openai_org_id: str = ""
     openai_model: str = "gpt-4o"
 
     # -- OdontoQuiz API --
@@ -39,6 +40,7 @@ class Settings(BaseSettings):
         "env_file": ".env",
         "env_file_encoding": "utf-8",
         "case_sensitive": False,
+        "extra": "ignore",  # Ignora vars extras no .env/ambiente (evita crash no startup)
     }
 
 

@@ -234,7 +234,7 @@ class OpenAIService:
     def _parse_json_seguro(self, texto: str) -> dict:
         """
         parseJsonSeguro() com contador de profundidade.
-        Substitui o regex greedy /\{[\\s\\S]*\\}/ por loop com contador {/}.
+        Substitui o regex greedy por loop com contador de chaves.
         """
         bruto = str(texto or "").strip()
         if not bruto:
