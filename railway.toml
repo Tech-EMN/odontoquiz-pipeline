@@ -1,24 +1,8 @@
-# OdontoQuiz Pipeline — Deploy no Railway
-
 [build]
 builder = "NIXPACKS"
-buildCommand = "pip install -r requirements.txt"
+# Deixe o Nixpacks auto-detectar: ele cria venv + pip install -r requirements.txt automaticamente
 
 [deploy]
-startCommand = "uvicorn src.main:app --host 0.0.0.0 --port $PORT"
+startCommand = "uvicorn src.main:app --host 0.0.0.0 --port ${PORT}"
 healthcheckPath = "/health"
-restartPolicyMaxRetries = 3
-
-[service]
-name = "odontoquiz-pipeline"
-
-[variable]
-# As variáveis sensíveis devem ser configuradas no dashboard do Railway,
-# NÃO neste arquivo. Use o comando: railway variables set KEY=VALUE
-#
-# Variáveis necessárias:
-#   SUPABASE_URL
-#   SUPABASE_SERVICE_ROLE_KEY
-#   OPENAI_API_KEY
-#   ODONTOQUIZ_API_KEY
-#   WEBHOOK_TOKEN
+restartPolicyMaxRetries = 5

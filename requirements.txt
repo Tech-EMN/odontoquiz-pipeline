@@ -1,31 +1,20 @@
-# OdontoQuiz Pipeline — Python Migration
-# Core
-fastapi>=0.115.0
-uvicorn[standard]>=0.30.0
-pydantic>=2.9.0
-pydantic-settings>=2.5.0
-python-multipart>=0.0.12
+# OdontoQuiz Pipeline — Railway Deploy
+# Versões relaxadas para evitar conflitos no Nixpacks
 
-# Supabase
-supabase>=2.7.0
-httpx>=0.27.0
+fastapi>=0.100.0
+uvicorn[standard]>=0.22.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+python-multipart>=0.0.5
 
-# OpenAI
-openai>=1.55.0
+supabase>=2.0.0
+httpx>=0.24.0
 
-# Async & Utils
-aiofiles>=24.1.0
-python-dateutil>=2.9.0
-tenacity>=9.0.0
+openai>=1.30.0
 
-# HTTP
-requests>=2.32.0
-aiohttp>=3.10.0
+aiofiles>=23.0.0
+python-dateutil>=2.8.0
+tenacity>=8.0.0
 
-# Redis (optional, for task queue)
-# redis>=5.2.0
-# arq>=0.26.0
-
-# Dev
-pytest>=8.3.0
-pytest-asyncio>=0.24.0
+requests>=2.28.0
+aiohttp>=3.8.0
