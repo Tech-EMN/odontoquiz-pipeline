@@ -7,9 +7,9 @@ import logging
 import sys
 import tempfile
 from contextlib import asynccontextmanager
-from typing import Optional, List
+from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Header, Request, BackgroundTasks, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, Header, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
@@ -140,81 +140,145 @@ async def ingestao_materiais(
 
 @app.post("/mcp/ingestao-upload")
 async def ingestao_upload(
-    provas: List[UploadFile] = File(default_factory=list),
-    gabaritos: List[UploadFile] = File(default_factory=list),
-    origem: str = Form(default="upload_manual"),
-    criado_por: str = Form(default="anon"),
-    observacoes: str = Form(default=""),
-    tracking_id: str = Form(default=""),
-    session_id: str = Form(default=""),
+    request: Request,
     authorization: str = Header(None),
 ):
     """
     Webhook de ingestão com upload direto (multipart/form-data).
-    Aceita arquivos enviados diretamente do frontend Lovable.
+    Compatível com o frontend Lovable (campos dinâmicos prova_1, prova_2, gabarito_1, etc).
 
-    Campos:
-    - provas: lista de arquivos de imagem/PDF das provas
-    - gabaritos: lista de arquivos de imagem/PDF dos gabaritos
-    - origem: fonte do upload (default: upload_manual)
-    - criado_por: identificador do usuário
-    - observacoes: notas adicionais
+    Formato esperado (igual ao que o Lovable envia):
+    - provas: JSON string ["prova_1", "prova_2"]
+    - gabaritos: JSON string ["gabarito_1"]
+    - prova_1: File
+    - prova_2: File
+    - gabarito_1: File
+    - origem: string
+    - criado_por: string
+    - observacoes: string (opcional)
+    - tracking_id: string
+    - session_id: string
+    - metadata: JSON string (opcional)
+    - token: string (autenticação)
     """
     validar_token(authorization)
 
     from .utils.file_utils import normalize_filename, validate_file
+    import json as json_mod
+
+    # Parse multipart form data manualmente (campo dinâmicos)
+    form = await request.form()
+
+    # Extrair metadados
+    origem = (form.get("origem") or "upload_manual")
+    if hasattr(origem, 'file'):
+        origem = await origem.read()
+        origem = origem.decode() if isinstance(origem, bytes) else str(origem)
+    else:
+        origem = str(origem)
+
+    criado_por = form.get("criado_por") or "anon"
+    if hasattr(criado_por, 'file'):
+        criado_por = await criado_por.read()
+        criado_por = criado_por.decode() if isinstance(criado_por, bytes) else str(criado_por)
+    else:
+        criado_por = str(criado_por)
+
+    observacoes = form.get("observacoes") or ""
+    if hasattr(observacoes, 'file'):
+        observacoes = await observacoes.read()
+        observacoes = observacoes.decode() if isinstance(observacoes, bytes) else str(observacoes)
+    else:
+        observacoes = str(observacoes)
+
+    tracking_id = form.get("tracking_id") or ""
+    if hasattr(tracking_id, 'file'):
+        tracking_id = await tracking_id.read()
+        tracking_id = tracking_id.decode() if isinstance(tracking_id, bytes) else str(tracking_id)
+    else:
+        tracking_id = str(tracking_id)
+
+    session_id = form.get("session_id") or ""
+    if hasattr(session_id, 'file'):
+        session_id = await session_id.read()
+        session_id = session_id.decode() if isinstance(session_id, bytes) else str(session_id)
+    else:
+        session_id = str(session_id)
+
+    # Ler listas de campos de arquivo (formato Lovable)
+    provas_json = form.get("provas")
+    gabaritos_json = form.get("gabaritos")
+
+    prova_keys = []
+    gabarito_keys = []
+
+    if provas_json:
+        if hasattr(provas_json, 'file'):
+            raw = await provas_json.read()
+            prova_keys = json_mod.loads(raw if isinstance(raw, (str, bytes)) else raw.decode())
+        else:
+            prova_keys = json_mod.loads(str(provas_json))
+
+    if gabaritos_json:
+        if hasattr(gabaritos_json, 'file'):
+            raw = await gabaritos_json.read()
+            gabarito_keys = json_mod.loads(raw if isinstance(raw, (str, bytes)) else raw.decode())
+        else:
+            gabarito_keys = json_mod.loads(str(gabaritos_json))
 
     pipeline = get_pipeline()
     lotes_dir = f"lotes/{tracking_id}" if tracking_id else f"lotes/manual_{criado_por}"
     arquivos_entrada = []
 
-    # Processar provas
-    for f in provas:
-        nome_normalizado = normalize_filename(f.filename or "prova.jpg")
-        storage_path = f"{lotes_dir}/originais/{nome_normalizado}"
+    # Processar provas (por chave dinâmica)
+    for key in prova_keys:
+        upload_file = form.get(key)
+        if not upload_file or not hasattr(upload_file, 'filename'):
+            continue
 
-        # Salvar temporariamente para upload ao Supabase
+        filename = upload_file.filename or "prova.jpg"
+        nome_normalizado = normalize_filename(filename)
+        storage_path = f"{lotes_dir}/originais/{nome_normalizado}"
+        content = await upload_file.read()
+
         with tempfile.NamedTemporaryFile(suffix=".tmp", delete=False) as tmp:
-            content = await f.read()
             tmp.write(content)
             tmp_path = tmp.name
 
-        # Validar qualidade
-        validation = validate_file(tmp_path, f.filename or nome_normalizado)
-
-        # Upload para Supabase Storage
-        content_type = f.content_type or "image/jpeg"
+        validation = validate_file(tmp_path, filename)
+        content_type = upload_file.content_type or "image/jpeg"
         pipeline.supabase.upload_arquivo(tmp_path, storage_path, content_type)
-
-        # Limpar temp
-        import os
         os.unlink(tmp_path)
 
         arquivos_entrada.append({
-            "nome_original": f.filename or "prova.jpg",
+            "nome_original": filename,
             "storage_path": storage_path,
             "tipo_hint": "prova",
             "validation": validation,
         })
 
-    # Processar gabaritos
-    for f in gabaritos:
-        nome_normalizado = normalize_filename(f.filename or "gabarito.jpg")
+    # Processar gabaritos (por chave dinâmica)
+    for key in gabarito_keys:
+        upload_file = form.get(key)
+        if not upload_file or not hasattr(upload_file, 'filename'):
+            continue
+
+        filename = upload_file.filename or "gabarito.jpg"
+        nome_normalizado = normalize_filename(filename)
         storage_path = f"{lotes_dir}/originais/{nome_normalizado}"
+        content = await upload_file.read()
 
         with tempfile.NamedTemporaryFile(suffix=".tmp", delete=False) as tmp:
-            content = await f.read()
             tmp.write(content)
             tmp_path = tmp.name
 
-        validation = validate_file(tmp_path, f.filename or nome_normalizado)
-        content_type = f.content_type or "image/jpeg"
+        validation = validate_file(tmp_path, filename)
+        content_type = upload_file.content_type or "image/jpeg"
         pipeline.supabase.upload_arquivo(tmp_path, storage_path, content_type)
-        import os
         os.unlink(tmp_path)
 
         arquivos_entrada.append({
-            "nome_original": f.filename or "gabarito.jpg",
+            "nome_original": filename,
             "storage_path": storage_path,
             "tipo_hint": "gabarito",
             "validation": validation,
@@ -224,6 +288,7 @@ async def ingestao_upload(
         raise HTTPException(status_code=400, detail="Nenhum arquivo enviado")
 
     # Criar payload e processar
+    import os as _os
     payload = {
         "lote_id": tracking_id or None,
         "arquivos": arquivos_entrada,
