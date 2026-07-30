@@ -10,7 +10,7 @@ from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Header, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from .core.config import get_settings
 from .core.pipeline import get_pipeline
@@ -103,7 +103,7 @@ async def root():
         "app": settings.app_name,
         "version": settings.app_version,
         "status": "online",
-        "deploy": "cb3e846-cors-fix",
+        "deploy": "opt-handler-fix",
     }
 
 
@@ -111,6 +111,14 @@ async def root():
 async def health():
     """Healthcheck detalhado."""
     return {"status": "healthy", "timestamp": __import__("datetime").datetime.now().isoformat()}
+
+
+# ─── CORS Preflight ───────────────────────────────────────────────────────────
+
+@app.options("/{rest_of_path:path}")
+async def cors_preflight(rest_of_path: str):
+    """Handler explícito de preflight CORS para todos os paths."""
+    return Response(status_code=200)
 
 
 @app.post("/mcp/ingestao-materiais", response_model=IngestaoResponse)
