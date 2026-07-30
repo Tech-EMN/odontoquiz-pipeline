@@ -103,6 +103,7 @@ async def root():
         "app": settings.app_name,
         "version": settings.app_version,
         "status": "online",
+        "deploy": "cb3e846-cors-fix",
     }
 
 
