@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Header, Request, BackgroundTasks
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from .core.config import get_settings
@@ -50,6 +51,19 @@ app = FastAPI(
     redoc_url=None,
 )
 
+# ─── CORS ────────────────────────────────────────────────────────────────────
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://ae3ac8e8-0445-4116-9b09-467f7ab0ea10.lovableproject.com",
+        "https://*.lovableproject.com",
+        "http://localhost:*",
+    ],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+)
 
 # ─── Middleware ────────────────────────────────────────────────────────────────
 
