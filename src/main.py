@@ -112,14 +112,6 @@ async def health():
     return {"status": "healthy", "timestamp": __import__("datetime").datetime.now().isoformat()}
 
 
-# ─── CORS Preflight ───────────────────────────────────────────────────────────
-
-@app.options("/{rest_of_path:path}")
-async def cors_preflight(rest_of_path: str):
-    """Handler explícito de preflight CORS para todos os paths."""
-    return Response(status_code=200)
-
-
 @app.post("/mcp/ingestao-materiais", response_model=IngestaoResponse)
 async def ingestao_materiais(
     payload: PayloadIngestao,
