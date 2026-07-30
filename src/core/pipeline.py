@@ -68,10 +68,10 @@ class OdontoQuizPipeline:
         # 1. Criar lote
         lote = self.supabase.criar_lote({
             "id": lote_id,
+            "origem": "webhook",
             "status": "pendente",
-            "metadados": metadados,
-            "qtd_arquivos": len(arquivos_entrada),
-            "criado_em": datetime.now(timezone.utc).isoformat(),
+            "metadata": json.dumps(metadados),
+            "total_arquivos": len(arquivos_entrada),
         })
 
         # 2. Processar cada arquivo
@@ -81,15 +81,17 @@ class OdontoQuizPipeline:
             nome_original = arquivo.get("nome_original", f"arquivo_{i}")
             storage_path_in = arquivo.get("storage_path", f"lotes/{lote_id}/originais/{nome_original}")
 
+            tipo_arquivo_inicial = arquivo.get("tipo_hint") or "indefinido"
             dados_arquivo = {
                 "id": arquivo_id,
                 "lote_id": lote_id,
+                "origem": "webhook",
                 "nome_original": nome_original,
                 "storage_path": storage_path_in,
-                "tipo_hint": arquivo.get("tipo_hint"),
-                "ordem": i,
+                "tipo_arquivo_inicial": tipo_arquivo_inicial,
+                "binary_key": f"arquivo_{i}",
                 "status": StatusArquivo.PENDENTE.value,
-                "criado_em": datetime.now(timezone.utc).isoformat(),
+                "metadata": {"ordem": i, "tipo_hint": arquivo.get("tipo_hint")},
             }
             self.supabase.inserir_arquivo(dados_arquivo)
             arquivos_processados.append(dados_arquivo)
@@ -127,15 +129,15 @@ class OdontoQuizPipeline:
                         arquivo["id"],
                         {
                             "status": StatusArquivo.CLASSIFICADO.value,
-                            "tipo_detectado": resultado.get("tipo_detectado"),
-                            "metadados_ocr": resultado,
+                            "tipo_arquivo_inicial": resultado.get("tipo_detectado"),
+                            "metadata": resultado,
                         },
                     )
                 except Exception as e:
                     logger.error(f"Erro OCR Leve no arquivo {arquivo['id']}: {e}")
                     self.supabase.atualizar_arquivo(
                         arquivo["id"],
-                        {"status": StatusArquivo.ERRO.value, "erro": str(e)},
+                        {"status": StatusArquivo.ERRO.value, "observacoes": str(e)},
                     )
 
             # --- Fase 2: Pareamento prova + gabarito ---
@@ -151,7 +153,7 @@ class OdontoQuizPipeline:
 
         except Exception as e:
             logger.exception(f"Erro fatal no processamento do lote {lote_id}: {e}")
-            self.supabase.atualizar_lote(lote_id, {"status": "erro", "erro": str(e)})
+            self.supabase.atualizar_lote(lote_id, {"status": "erro", "observacoes": str(e)})
             self.supabase.notificar_progresso(lote_id, "pipeline", "erro", {"erro": str(e)})
 
     # ═══════════════════════════════════════════════════════════════════════════
@@ -178,7 +180,7 @@ class OdontoQuizPipeline:
             }
 
         try:
-            tipo_hint = arquivo.get("tipo_hint", "indefinido")
+            tipo_hint = arquivo.get("tipo_arquivo_inicial") or arquivo.get("tipo_hint") or "indefinido"
             resultado_ia = await self.openai.classificar_documento(tmp_path, tipo_hint)
 
             # CORREÇÃO #5: Validar erro do Analyze Image
@@ -315,14 +317,15 @@ class OdontoQuizPipeline:
 
             if melhor_prova and melhor_score > 0.3:  # threshold mínimo
                 par_id = str(uuid4())
+                chave = f"{melhor_prova.get('orgao','')}|{melhor_prova.get('concurso','')}|{melhor_prova.get('cargo','')}|{melhor_prova.get('codigo_prova','')}"
                 par = {
                     "id": par_id,
                     "lote_id": lote_id,
                     "arquivo_prova_id": melhor_prova["arquivo_id"],
                     "arquivo_gabarito_id": gabarito["arquivo_id"],
-                    "score": melhor_score,
+                    "confianca_pareamento": round(melhor_score, 2),
                     "status": StatusPar.PAREADO.value if melhor_score > 0.6 else StatusPar.REVISAO_MANUAL.value,
-                    "criado_em": datetime.now(timezone.utc).isoformat(),
+                    "chave_pareamento": self._normalizar_texto(chave),
                 }
                 self.supabase.criar_par(par)
                 pares.append(par)
@@ -330,10 +333,10 @@ class OdontoQuizPipeline:
             else:
                 logger.warning(f"[PAREAMENTO] Nenhuma prova encontrada para gabarito {gabarito['arquivo_id']} (max_score={melhor_score:.2f})")
 
-        # Atualizar status dos arquivos pareados
+        # Atualizar chave_pareamento nos arquivos pareados
         for par in pares:
-            self.supabase.atualizar_arquivo(par["arquivo_prova_id"], {"par_id": par["id"]})
-            self.supabase.atualizar_arquivo(par["arquivo_gabarito_id"], {"par_id": par["id"]})
+            self.supabase.atualizar_arquivo(par["arquivo_prova_id"], {"chave_pareamento": par["chave_pareamento"]})
+            self.supabase.atualizar_arquivo(par["arquivo_gabarito_id"], {"chave_pareamento": par["chave_pareamento"]})
 
         return pares
 
@@ -366,7 +369,7 @@ class OdontoQuizPipeline:
             contexto_prova = {
                 "nome_original": prova["nome_original"],
                 "tipo_esperado": "prova",
-                "ordem_arquivo": prova.get("ordem", 1),
+                "ordem_arquivo": (prova.get("metadata") or {}).get("ordem", 1) if isinstance(prova.get("metadata"), dict) else 1,
                 "total_arquivos": 2,
                 "arquivo_gabarito_id": gabarito["id"],
                 "arquivos_prova_ids": [prova["id"]],
@@ -414,10 +417,10 @@ class OdontoQuizPipeline:
                 resultado_gabarito=resultado_gabarito,
             )
 
-            # 6. Salvar resultado
+            # 6. Salvar resultado no metadata do arquivo
             self.supabase.atualizar_arquivo(prova["id"], {
                 "status": StatusArquivo.EXTRAIDO.value,
-                "payload_etapa2": payload.model_dump(),
+                "metadata": {"payload_etapa2": payload.model_dump()},
             })
             self.supabase.atualizar_par(par["id"], {"status": StatusPar.PROCESSADO.value})
 
@@ -630,7 +633,7 @@ class OdontoQuizPipeline:
         logger.info(f"[IMPORTAÇÃO] Importando {len(payload.questoes)} questões do arquivo {payload.arquivo_id}")
 
         prova = self.supabase.buscar_arquivo(payload.arquivo_id)
-        metadados = (prova or {}).get("metadados_ocr", {})
+        metadados = (prova or {}).get("metadata", {}) or {}
 
         # CORREÇÃO #4: IDs de referência devem vir do payload, nunca hardcoded
         banca_id = metadados.get("banca_id")

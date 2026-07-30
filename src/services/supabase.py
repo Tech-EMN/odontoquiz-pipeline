@@ -122,7 +122,7 @@ class SupabaseService:
             self.client.table("arquivos")
             .select("*")
             .eq("lote_id", lote_id)
-            .eq("tipo_detectado", tipo_oposto)
+            .eq("tipo_arquivo_inicial", tipo_oposto)
             .eq("status", "classificado")
             .execute()
         )
@@ -131,19 +131,19 @@ class SupabaseService:
     # ─── Pares ───────────────────────────────────────────────────────────
 
     def criar_par(self, dados: dict) -> dict:
-        """Insere um novo par prova+gabarito na tabela 'pares'."""
-        result = self.client.table("pares").insert(dados).execute()
+        """Insere um novo par prova+gabarito na tabela 'pares_arquivos'."""
+        result = self.client.table("pares_arquivos").insert(dados).execute()
         return result.data[0] if result.data else {}
 
     def atualizar_par(self, par_id: str, dados: dict) -> dict:
         """Atualiza um par existente."""
-        result = self.client.table("pares").update(dados).eq("id", par_id).execute()
+        result = self.client.table("pares_arquivos").update(dados).eq("id", par_id).execute()
         return result.data[0] if result.data else {}
 
     def listar_pares_lote(self, lote_id: str) -> list[dict]:
         """Lista todos os pares de um lote."""
         result = (
-            self.client.table("pares").select("*").eq("lote_id", lote_id).execute()
+            self.client.table("pares_arquivos").select("*").eq("lote_id", lote_id).execute()
         )
         return result.data or []
 
@@ -151,18 +151,15 @@ class SupabaseService:
 
     def notificar_progresso(self, lote_id: str, etapa: str, status: str, detalhes: dict = None) -> None:
         """
-        Notifica o frontend Lovable via Supabase Realtime / Edge Function.
-        Alternativa: usar a Edge Function progress-update existente.
+        Notifica progresso via atualização do status do lote.
+        A tabela 'progresso' não existe neste schema — usa atualização
+        de status no próprio lote + log como fallback.
         """
         try:
-            payload = {
-                "lote_id": lote_id,
-                "etapa": etapa,
-                "status": status,
-                "detalhes": detalhes or {},
-                "timestamp": "now()",
-            }
-            self.client.table("progresso").upsert(payload).execute()
+            self.atualizar_lote(lote_id, {
+                "status": f"{etapa}_{status}",
+                "metadata": {"etapa": etapa, "status": status, "detalhes": detalhes or {}},
+            })
         except Exception as e:
             logger.warning(f"Falha ao notificar progresso: {e}")
 
