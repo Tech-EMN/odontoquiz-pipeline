@@ -5,12 +5,14 @@ Hospedagem: Railway
 """
 import logging
 import sys
+import tempfile
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import Optional, List
 
-from fastapi import FastAPI, HTTPException, Header, Request, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Header, Request, BackgroundTasks, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
+from pydantic import BaseModel
 
 from .core.config import get_settings
 from .core.pipeline import get_pipeline
@@ -127,28 +129,123 @@ async def ingestao_materiais(
     authorization: str = Header(None),
 ):
     """
-    Webhook de ingestão de materiais (substitui WF4).
-    Recebe um lote de arquivos (provas + gabaritos) e inicia o processamento.
+    Webhook de ingestão de materiais — JSON (substitui WF4).
+    Recebe um lote de arquivos (provas + gabaritos) com storage_paths.
+    """
+    validar_token(authorization)
+    pipeline = get_pipeline()
+    resultado = await pipeline.processar_ingestao(payload.model_dump())
+    return resultado
 
-    Payload esperado:
-    ```json
-    {
-      "lote_id": "opcional-uuid",
-      "arquivos": [
-        {
-          "nome_original": "prova_tipo1_pag1.jpg",
-          "storage_path": "lotes/xxx/originais/prova_tipo1_pag1.jpg",
-          "tipo_hint": "prova"
-        }
-      ],
-      "metadados": {}
-    }
-    ```
+
+@app.post("/mcp/ingestao-upload")
+async def ingestao_upload(
+    provas: List[UploadFile] = File(default_factory=list),
+    gabaritos: List[UploadFile] = File(default_factory=list),
+    origem: str = Form(default="upload_manual"),
+    criado_por: str = Form(default="anon"),
+    observacoes: str = Form(default=""),
+    tracking_id: str = Form(default=""),
+    session_id: str = Form(default=""),
+    authorization: str = Header(None),
+):
+    """
+    Webhook de ingestão com upload direto (multipart/form-data).
+    Aceita arquivos enviados diretamente do frontend Lovable.
+
+    Campos:
+    - provas: lista de arquivos de imagem/PDF das provas
+    - gabaritos: lista de arquivos de imagem/PDF dos gabaritos
+    - origem: fonte do upload (default: upload_manual)
+    - criado_por: identificador do usuário
+    - observacoes: notas adicionais
     """
     validar_token(authorization)
 
+    from .utils.file_utils import normalize_filename, validate_file
+
     pipeline = get_pipeline()
-    resultado = await pipeline.processar_ingestao(payload.model_dump())
+    lotes_dir = f"lotes/{tracking_id}" if tracking_id else f"lotes/manual_{criado_por}"
+    arquivos_entrada = []
+
+    # Processar provas
+    for f in provas:
+        nome_normalizado = normalize_filename(f.filename or "prova.jpg")
+        storage_path = f"{lotes_dir}/originais/{nome_normalizado}"
+
+        # Salvar temporariamente para upload ao Supabase
+        with tempfile.NamedTemporaryFile(suffix=".tmp", delete=False) as tmp:
+            content = await f.read()
+            tmp.write(content)
+            tmp_path = tmp.name
+
+        # Validar qualidade
+        validation = validate_file(tmp_path, f.filename or nome_normalizado)
+
+        # Upload para Supabase Storage
+        content_type = f.content_type or "image/jpeg"
+        pipeline.supabase.upload_arquivo(tmp_path, storage_path, content_type)
+
+        # Limpar temp
+        import os
+        os.unlink(tmp_path)
+
+        arquivos_entrada.append({
+            "nome_original": f.filename or "prova.jpg",
+            "storage_path": storage_path,
+            "tipo_hint": "prova",
+            "validation": validation,
+        })
+
+    # Processar gabaritos
+    for f in gabaritos:
+        nome_normalizado = normalize_filename(f.filename or "gabarito.jpg")
+        storage_path = f"{lotes_dir}/originais/{nome_normalizado}"
+
+        with tempfile.NamedTemporaryFile(suffix=".tmp", delete=False) as tmp:
+            content = await f.read()
+            tmp.write(content)
+            tmp_path = tmp.name
+
+        validation = validate_file(tmp_path, f.filename or nome_normalizado)
+        content_type = f.content_type or "image/jpeg"
+        pipeline.supabase.upload_arquivo(tmp_path, storage_path, content_type)
+        import os
+        os.unlink(tmp_path)
+
+        arquivos_entrada.append({
+            "nome_original": f.filename or "gabarito.jpg",
+            "storage_path": storage_path,
+            "tipo_hint": "gabarito",
+            "validation": validation,
+        })
+
+    if not arquivos_entrada:
+        raise HTTPException(status_code=400, detail="Nenhum arquivo enviado")
+
+    # Criar payload e processar
+    payload = {
+        "lote_id": tracking_id or None,
+        "arquivos": arquivos_entrada,
+        "metadados": {
+            "origem": origem,
+            "criado_por": criado_por,
+            "observacoes": observacoes,
+            "tracking_id": tracking_id,
+            "session_id": session_id,
+        },
+    }
+
+    resultado = await pipeline.processar_ingestao(payload)
+
+    # Adicionar warnings de validação
+    warnings = [
+        a["validation"].get("warning")
+        for a in arquivos_entrada
+        if a.get("validation", {}).get("warning")
+    ]
+    if warnings:
+        resultado["warnings"] = warnings
 
     return resultado
 

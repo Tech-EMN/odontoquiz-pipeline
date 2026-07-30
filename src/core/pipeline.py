@@ -27,6 +27,12 @@ from ..models.schemas import (
 from ..services.supabase import get_supabase
 from ..services.openai_client import get_openai
 from ..services.odontoquiz_api import get_odontoquiz_api
+from ..utils.file_utils import (
+    pdf_to_images,
+    is_pdf,
+    validate_file,
+    normalize_filename,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -164,11 +170,16 @@ class OdontoQuizPipeline:
         """
         Classifica um documento como prova/gabarito/indefinido.
         Equivalente ao WF1: Odontoquiz OCR Leve - Identificação de Documento.
+        Suporta PDF (converte primeira página para imagem automaticamente).
         """
         logger.info(f"[OCR LEVE] Classificando arquivo {arquivo['id']}: {arquivo['nome_original']}")
 
         # Download do arquivo do Supabase Storage
-        tmp_path = os.path.join(tempfile.gettempdir(), f"ocr_leve_{arquivo['id']}.jpg")
+        ext = ".pdf" if ".pdf" in (arquivo.get("storage_path", "") or "").lower() else \
+              "." + (arquivo.get("storage_path", "") or "").split(".")[-1] if "." in (arquivo.get("storage_path", "") or "") else ".jpg"
+        tmp_path = os.path.join(tempfile.gettempdir(), f"ocr_leve_{arquivo['id']}{ext}")
+        tmp_images = []  # Para limpeza de PDFs convertidos
+
         try:
             self.supabase.download_arquivo(arquivo["storage_path"], tmp_path)
         except Exception as e:
@@ -180,8 +191,38 @@ class OdontoQuizPipeline:
             }
 
         try:
+            # CORREÇÃO BUG #2: Converter PDF para imagem se necessário
+            image_path = tmp_path
+            is_pdf_file = is_pdf(tmp_path)
+            pdf_pages = 1
+
+            if is_pdf_file:
+                logger.info(f"[OCR LEVE] PDF detectado, convertendo para imagem...")
+                try:
+                    images = pdf_to_images(tmp_path, dpi=150)
+                    if images:
+                        image_path = images[0]  # OCR Leve só precisa da primeira página
+                        tmp_images = images
+                        pdf_pages = len(images)
+                        logger.info(f"[OCR LEVE] PDF convertido: {pdf_pages} páginas, usando p1 para classificação")
+                    else:
+                        raise ValueError("PDF não gerou imagens")
+                except Exception as e:
+                    logger.error(f"[OCR LEVE] Falha ao converter PDF: {e}")
+                    return {
+                        "arquivo_id": arquivo["id"],
+                        "nome_original": arquivo["nome_original"],
+                        "erro_ocr_imagem": True,
+                        "mensagem": f"Falha ao converter PDF para imagem: {e}",
+                    }
+
+            # Validação de qualidade (BUG #7)
+            validation = validate_file(image_path, arquivo.get("nome_original", ""))
+            if validation.get("warning"):
+                logger.warning(f"[OCR LEVE] ⚠️ {validation['warning']}")
+
             tipo_hint = arquivo.get("tipo_arquivo_inicial") or arquivo.get("tipo_hint") or "indefinido"
-            resultado_ia = await self.openai.classificar_documento(tmp_path, tipo_hint)
+            resultado_ia = await self.openai.classificar_documento(image_path, tipo_hint)
 
             # CORREÇÃO #5: Validar erro do Analyze Image
             if resultado_ia.get("error"):
@@ -215,9 +256,12 @@ class OdontoQuizPipeline:
                 "fonte_metadados": "image_analyze",
                 "erro_ocr_imagem": False,
                 "resposta_ia_parseada": resultado_ia,
+                "is_pdf": is_pdf_file,
+                "pdf_pages": pdf_pages,
+                "image_quality_warning": validation.get("warning"),
             }
 
-            logger.info(f"[OCR LEVE] {arquivo['id']}: {tipo_detectado} (confiança: {metadados['confianca_identificacao']})")
+            logger.info(f"[OCR LEVE] {arquivo['id']}: {tipo_detectado} (confiança: {metadados['confianca_identificacao']}, pdf={is_pdf_file})")
             return metadados
 
         except Exception as e:
@@ -232,6 +276,9 @@ class OdontoQuizPipeline:
             # Limpeza
             if os.path.exists(tmp_path):
                 os.unlink(tmp_path)
+            for img in tmp_images:
+                if os.path.exists(img):
+                    os.unlink(img)
 
     # ═══════════════════════════════════════════════════════════════════════════
     # ETAPA 3: PAREAMENTO (WF4)
@@ -348,6 +395,7 @@ class OdontoQuizPipeline:
         """
         Extrai questões, gabarito, disciplinas e assuntos de um par prova+gabarito.
         Equivalente ao WF2: ETAPA 2 OCR.
+        Suporta PDF (converte todas as páginas e combina resultados).
         """
         logger.info(f"[ETAPA 2] Processando par {par['id']}")
 
@@ -360,46 +408,95 @@ class OdontoQuizPipeline:
         # 1. Baixar arquivos
         tmp_prova = os.path.join(tempfile.gettempdir(), f"etapa2_prova_{prova['id']}.jpg")
         tmp_gabarito = os.path.join(tempfile.gettempdir(), f"etapa2_gabarito_{gabarito['id']}.jpg")
+        tmp_imgs_prova = []
+        tmp_imgs_gabarito = []
 
         try:
             self.supabase.download_arquivo(prova["storage_path"], tmp_prova)
             self.supabase.download_arquivo(gabarito["storage_path"], tmp_gabarito)
 
-            # 2. Extrair questões da prova
-            contexto_prova = {
-                "nome_original": prova["nome_original"],
-                "tipo_esperado": "prova",
-                "ordem_arquivo": (prova.get("metadata") or {}).get("ordem", 1) if isinstance(prova.get("metadata"), dict) else 1,
-                "total_arquivos": 2,
-                "arquivo_gabarito_id": gabarito["id"],
-                "arquivos_prova_ids": [prova["id"]],
-            }
+            # CORREÇÃO BUG #2: Converter PDFs para imagens
+            prova_images = [tmp_prova]
+            gabarito_images = [tmp_gabarito]
 
-            resultado_prova = await self.openai.extrair_questoes_gabarito(tmp_prova, contexto_prova)
+            if is_pdf(tmp_prova):
+                logger.info(f"[ETAPA 2] Prova é PDF, convertendo...")
+                prova_images = pdf_to_images(tmp_prova, dpi=150)
+                tmp_imgs_prova = prova_images
+                logger.info(f"[ETAPA 2] Prova PDF: {len(prova_images)} páginas")
 
-            # CORREÇÃO #5: Validar erro
-            if resultado_prova.get("error"):
-                raise ValueError(f"Erro na extração da prova: {resultado_prova['error']}")
+            if is_pdf(tmp_gabarito):
+                logger.info(f"[ETAPA 2] Gabarito é PDF, convertendo...")
+                gabarito_images = pdf_to_images(tmp_gabarito, dpi=150)
+                tmp_imgs_gabarito = gabarito_images
+                logger.info(f"[ETAPA 2] Gabarito PDF: {len(gabarito_images)} páginas")
 
-            # 3. Extrair gabarito
-            contexto_gabarito = {
-                "nome_original": gabarito["nome_original"],
-                "tipo_esperado": "gabarito",
-                "ordem_arquivo": 2,
-                "total_arquivos": 2,
-                "arquivo_gabarito_id": gabarito["id"],
-                "arquivos_prova_ids": [prova["id"]],
-            }
+            # 2. Extrair questões da prova (todas as páginas)
+            todas_questoes = []
+            todas_disciplinas_sugeridas = []
+            resultado_prova = {}
 
-            resultado_gabarito = await self.openai.extrair_questoes_gabarito(tmp_gabarito, contexto_gabarito)
+            for i, img_path in enumerate(prova_images):
+                contexto_prova = {
+                    "nome_original": prova["nome_original"],
+                    "tipo_esperado": "prova",
+                    "ordem_arquivo": (prova.get("metadata") or {}).get("ordem", i + 1) if isinstance(prova.get("metadata"), dict) else i + 1,
+                    "total_arquivos": len(prova_images),
+                    "arquivo_gabarito_id": gabarito["id"],
+                    "arquivos_prova_ids": [prova["id"]],
+                }
 
-            # CORREÇÃO #5: Validar erro
-            if resultado_gabarito.get("error"):
-                raise ValueError(f"Erro na extração do gabarito: {resultado_gabarito['error']}")
+                resultado_pagina = await self.openai.extrair_questoes_gabarito(img_path, contexto_prova)
+                if resultado_pagina.get("error"):
+                    logger.warning(f"[ETAPA 2] Erro na página {i+1}: {resultado_pagina['error']}")
+                    continue
+
+                qs = resultado_pagina.get("questoes", [])
+                todas_questoes.extend(qs)
+                todas_disciplinas_sugeridas.extend(resultado_pagina.get("disciplinas_sugeridas", []))
+                if i == 0:
+                    resultado_prova = resultado_pagina
+
+            resultado_prova["questoes"] = todas_questoes
+            resultado_prova["disciplinas_sugeridas"] = todas_disciplinas_sugeridas
+            logger.info(f"[ETAPA 2] Prova: {len(todas_questoes)} questões de {len(prova_images)} páginas")
+
+            # 3. Extrair gabarito (todas as páginas)
+            todas_respostas = {}
+            resultado_gabarito = {}
+
+            for i, img_path in enumerate(gabarito_images):
+                contexto_gabarito = {
+                    "nome_original": gabarito["nome_original"],
+                    "tipo_esperado": "gabarito",
+                    "ordem_arquivo": i + 1,
+                    "total_arquivos": len(gabarito_images),
+                    "arquivo_gabarito_id": gabarito["id"],
+                    "arquivos_prova_ids": [prova["id"]],
+                }
+
+                resultado_pagina = await self.openai.extrair_questoes_gabarito(img_path, contexto_gabarito)
+                if resultado_pagina.get("error"):
+                    logger.warning(f"[ETAPA 2] Erro no gabarito p{i+1}: {resultado_pagina['error']}")
+                    continue
+
+                gab = resultado_pagina.get("gabarito", {})
+                respostas = gab.get("respostas", {}) if gab else {}
+                todas_respostas.update(respostas)
+                if i == 0:
+                    resultado_gabarito = resultado_pagina
+
+            resultado_gabarito["gabarito"] = {"respostas": todas_respostas}
+            logger.info(f"[ETAPA 2] Gabarito: {len(todas_respostas)} respostas de {len(gabarito_images)} páginas")
 
             # 4. Buscar referências do OdontoQuiz para validação
             disciplinas = await self._buscar_disciplinas_com_fallback()
-            assuntos = await self.api.listar_assuntos()
+            try:
+                assuntos = await self.api.listar_assuntos()
+            except Exception as e:
+                logger.warning(f"[ETAPA 2] API assuntos offline, usando cache: {e}")
+                from ..services.discipline_cache import get_assuntos_fallback
+                assuntos = get_assuntos_fallback()
 
             # 5. Validar referências (CORREÇÃO #3: mapear disciplinas/assuntos para IDs)
             questoes_raw = resultado_prova.get("questoes", [])
@@ -433,36 +530,29 @@ class OdontoQuizPipeline:
             return payload
 
         finally:
-            for p in [tmp_prova, tmp_gabarito]:
+            all_temps = [tmp_prova, tmp_gabarito] + tmp_imgs_prova + tmp_imgs_gabarito
+            for p in all_temps:
                 if os.path.exists(p):
                     os.unlink(p)
 
     async def _buscar_disciplinas_com_fallback(self) -> list[dict]:
         """
-        Busca disciplinas da API com fallback estático (CORREÇÃO #2).
-        Mesma lógica do nó 'Code - Preparar Validação Referências IA' do WF2.
+        Busca disciplinas da API com fallback para cache local (CORREÇÃO BUG #1).
+        Se a API OdontoQuiz estiver offline, usa cache estático.
         """
+        from ..services.discipline_cache import get_disciplinas_fallback
+
         try:
             disciplinas = await self.api.listar_disciplinas()
             if disciplinas and len(disciplinas) > 0:
+                logger.info(f"[REFERÊNCIAS] {len(disciplinas)} disciplinas da API")
                 return disciplinas
         except Exception as e:
-            logger.warning(f"Falha ao buscar disciplinas da API: {e}")
+            logger.warning(f"[REFERÊNCIAS] API OdontoQuiz indisponível: {e}")
 
-        # CORREÇÃO #2: Fallback estático com IDs reais
-        logger.info("Usando fallback estático de disciplinas")
-        return [
-            {"id": 97, "nome": "Cirurgia Oral"},
-            {"id": 50, "nome": "Dentística"},
-            {"id": 53, "nome": "Endodontia"},
-            {"id": 73, "nome": "Estomatologia"},
-            {"id": 71, "nome": "Odontopediatria"},
-            {"id": 72, "nome": "Ortodontia"},
-            {"id": 74, "nome": "Periodontia"},
-            {"id": 76, "nome": "Prótese Dentária"},
-            {"id": 77, "nome": "Radiologia"},
-            {"id": 80, "nome": "Saúde Coletiva"},
-        ]
+        # Fallback para cache local
+        logger.warning("[REFERÊNCIAS] Usando cache local de disciplinas")
+        return get_disciplinas_fallback()
 
     async def _montar_payload_etapa2(
         self,
