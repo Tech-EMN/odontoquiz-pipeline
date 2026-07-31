@@ -4,6 +4,7 @@ Substitui os webhooks do n8n (WF4: /mcp/ingestao-materiais, WF3: Webhook de Deci
 Hospedagem: Railway
 """
 import logging
+import os
 import sys
 import tempfile
 from contextlib import asynccontextmanager
@@ -277,7 +278,6 @@ async def ingestao_upload(
         raise HTTPException(status_code=400, detail="Nenhum arquivo enviado")
 
     # Criar payload e processar
-    import os as _os
     payload = {
         "lote_id": tracking_id or None,
         "arquivos": arquivos_entrada,
