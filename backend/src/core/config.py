@@ -36,6 +36,11 @@ class Settings(BaseSettings):
     ocr_timeout_seconds: int = 120
     image_max_size_mb: int = 20
 
+    # -- Celery + Redis (F2) --
+    redis_url: str = "redis://localhost:6379/0"
+    celery_broker_url: str = ""  # Defaults to redis_url if empty
+    celery_result_backend: str = ""  # Defaults to redis_url if empty
+
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",

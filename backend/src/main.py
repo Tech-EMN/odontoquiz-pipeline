@@ -25,6 +25,18 @@ from .models.schemas import (
     StatusArquivo,
 )
 
+# ─── Celery (F2) ──────────────────────────────────────────────────────────────
+
+try:
+    from .workers.celery_app import celery_app
+    CELERY_AVAILABLE = True
+    logger_early = logging.getLogger("odontoquiz")
+    logger_early.info("✅ Celery worker disponível — pipeline assíncrono")
+except Exception as e:
+    CELERY_AVAILABLE = False
+    import warnings
+    warnings.warn(f"⚠️ Celery não disponível: {e}. Pipeline rodará síncrono.")
+
 # ─── Logging ──────────────────────────────────────────────────────────────────
 
 settings = get_settings()
@@ -111,6 +123,30 @@ async def root():
 async def health():
     """Healthcheck detalhado."""
     return {"status": "healthy", "timestamp": __import__("datetime").datetime.now().isoformat()}
+
+
+@app.get("/tasks/{task_id}/status")
+async def task_status(task_id: str):
+    """
+    Consulta status de uma task Celery (F2).
+    Retorna estado atual e metadados de progresso.
+    """
+    if not CELERY_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Celery não disponível")
+
+    from .workers.tasks import processar_lote_task
+    task = processar_lote_task.AsyncResult(task_id)
+
+    response = {
+        "task_id": task_id,
+        "status": task.state,
+        "info": task.info if task.info and isinstance(task.info, dict) else {},
+    }
+
+    if task.state == "FAILURE":
+        response["erro"] = str(task.info)
+
+    return response
 
 
 @app.post("/mcp/ingestao-materiais", response_model=IngestaoResponse)

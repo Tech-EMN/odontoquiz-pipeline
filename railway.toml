@@ -6,3 +6,8 @@ builder = "NIXPACKS"
 startCommand = "uvicorn backend.src.main:app --host 0.0.0.0 --port ${PORT}"
 healthcheckPath = "/health"
 restartPolicyMaxRetries = 5
+
+# ─── Worker Service (F2) ───────────────────────────────────────────────────
+# Crie um segundo serviço no Railway apontando para o mesmo repo com:
+#   startCommand = "celery -A backend.src.workers.celery_app worker --loglevel=info --concurrency=2"
+# O Redis deve ser adicionado como plugin/add-on ao projeto Railway.

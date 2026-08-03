@@ -35,6 +35,14 @@ from ..utils.file_utils import (
     compute_hash,
 )
 
+# ─── Celery dispatch (F2) ─────────────────────────────────────────────────
+
+try:
+    from ..workers.tasks import processar_lote_task
+    CELERY_AVAILABLE = True
+except Exception:
+    CELERY_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -128,12 +136,20 @@ class OdontoQuizPipeline:
         # 3. Atualizar status do lote
         self.supabase.atualizar_lote(lote_id, {"status": "arquivos_registrados"})
 
-        # 4. Disparar processamento assíncrono
-        asyncio.create_task(self._processar_lote(lote_id, arquivos_processados))
+        # 4. Disparar processamento assíncrono (Celery ou fallback asyncio)
+        if CELERY_AVAILABLE:
+            task = processar_lote_task.delay(lote_id, arquivos_processados)
+            logger.info(f"[INGESTÃO] Celery task disparada: {task.id}")
+            task_id = task.id
+        else:
+            asyncio.create_task(self._processar_lote(lote_id, arquivos_processados))
+            logger.info(f"[INGESTÃO] Processamento assíncrono (fallback asyncio)")
+            task_id = None
 
         return {
             "status": "recebido",
             "lote_id": lote_id,
+            "task_id": task_id,
             "arquivos_recebidos": len(arquivos_entrada),
             "mensagem": f"Lote {lote_id} recebido. Processamento iniciado.",
         }

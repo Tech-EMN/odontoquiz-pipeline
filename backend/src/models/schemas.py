@@ -153,6 +153,7 @@ class PayloadDecisao(BaseModel):
 class IngestaoResponse(BaseModel):
     status: str
     lote_id: str
+    task_id: Optional[str] = None  # Celery task ID (F2)
     arquivos_recebidos: int
     mensagem: str
 
