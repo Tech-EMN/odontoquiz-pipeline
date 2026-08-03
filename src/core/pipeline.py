@@ -32,6 +32,7 @@ from ..utils.file_utils import (
     is_pdf,
     validate_file,
     normalize_filename,
+    compute_hash,
 )
 
 logger = logging.getLogger(__name__)
@@ -80,14 +81,34 @@ class OdontoQuizPipeline:
             "total_arquivos": len(arquivos_entrada),
         })
 
-        # 2. Processar cada arquivo
+        # 2. Processar cada arquivo (com hash e dedup — FIX A2 + A3)
         arquivos_processados = []
         for i, arquivo in enumerate(arquivos_entrada):
             arquivo_id = str(uuid4())
             nome_original = arquivo.get("nome_original", f"arquivo_{i}")
             storage_path_in = arquivo.get("storage_path", f"lotes/{lote_id}/originais/{nome_original}")
-
             tipo_arquivo_inicial = arquivo.get("tipo_hint") or "indefinido"
+
+            # FIX A2+A3: Calcular hash do arquivo e verificar duplicata
+            hash_arquivo = None
+            duplicado_de = None
+            status_inicial = StatusArquivo.PENDENTE.value
+
+            try:
+                tmp_hash = os.path.join(tempfile.gettempdir(), f"hash_{arquivo_id}")
+                self.supabase.download_arquivo(storage_path_in, tmp_hash)
+                hash_arquivo = compute_hash(tmp_hash)
+                os.unlink(tmp_hash)
+
+                # Verificar duplicata (FIX A3)
+                existente = self.supabase.buscar_arquivo_por_hash(hash_arquivo)
+                if existente:
+                    duplicado_de = existente["id"]
+                    status_inicial = StatusArquivo.RECUSADO.value
+                    logger.info(f"[INGESTÃO] Arquivo duplicado: {nome_original} (hash={hash_arquivo[:16]}...) → original={duplicado_de}")
+            except Exception as e:
+                logger.warning(f"[INGESTÃO] Falha ao calcular hash para {nome_original}: {e}")
+
             dados_arquivo = {
                 "id": arquivo_id,
                 "lote_id": lote_id,
@@ -96,7 +117,9 @@ class OdontoQuizPipeline:
                 "storage_path": storage_path_in,
                 "tipo_arquivo_inicial": tipo_arquivo_inicial,
                 "binary_key": f"arquivo_{i}",
-                "status": StatusArquivo.PENDENTE.value,
+                "status": status_inicial,
+                "hash_arquivo": hash_arquivo,
+                "duplicado_de": duplicado_de,
                 "metadata": {"ordem": i, "tipo_hint": arquivo.get("tipo_hint")},
             }
             self.supabase.inserir_arquivo(dados_arquivo)

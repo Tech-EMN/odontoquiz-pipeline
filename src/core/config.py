@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     supabase_url: str = ""
     supabase_service_role_key: str = ""
     supabase_anon_key: str = ""
-    supabase_storage_bucket: str = "odontoquiz"
+    supabase_storage_bucket: str = "materiais"
 
     # -- OpenAI --
     openai_api_key: str = ""

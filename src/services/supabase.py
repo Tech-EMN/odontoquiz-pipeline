@@ -26,7 +26,7 @@ class SupabaseService:
             _settings.supabase_url,
             _settings.supabase_service_role_key,
         )
-        self.bucket = _settings.supabase_storage_bucket or "odontoquiz"
+        self.bucket = _settings.supabase_storage_bucket or "materiais"
 
     # ─── Storage ─────────────────────────────────────────────────────────
 

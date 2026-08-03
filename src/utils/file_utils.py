@@ -159,6 +159,22 @@ def validate_file(file_path: str, nome_original: str = "") -> dict:
     return result
 
 
+def compute_hash(file_path: str, algorithm: str = "sha256") -> str:
+    """
+    Calcula o hash de um arquivo (default: SHA256).
+    Lê o arquivo em chunks para não estourar memória com arquivos grandes.
+    """
+    import hashlib
+    h = hashlib.new(algorithm)
+    with open(file_path, "rb") as f:
+        while True:
+            chunk = f.read(8192)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def normalize_filename(nome_original: str) -> str:
     """
     Normaliza nome de arquivo para storage_path.
