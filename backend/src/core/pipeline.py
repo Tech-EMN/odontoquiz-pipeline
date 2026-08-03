@@ -5,7 +5,6 @@ Substitui os 4 workflows n8n (WF1, WF2, WF3, WF4) em um único pipeline coeso.
 import asyncio
 import hashlib
 import json
-import logging
 import os
 import tempfile
 import time
@@ -34,6 +33,7 @@ from ..utils.file_utils import (
     normalize_filename,
     compute_hash,
 )
+from .logging import get_logger, set_lote_id, clear_context
 
 # ─── Celery dispatch (F2) ─────────────────────────────────────────────────
 
@@ -43,7 +43,7 @@ try:
 except Exception:
     CELERY_AVAILABLE = False
 
-logger = logging.getLogger(__name__)
+logger = get_logger("odontoquiz.pipeline")
 
 
 class OdontoQuizPipeline:
@@ -751,7 +751,129 @@ class OdontoQuizPipeline:
         return resultado
 
     # ═══════════════════════════════════════════════════════════════════════════
-    # ETAPA 5: IMPORTAÇÃO (WF3)
+    # ETAPA 5: PORTAL DE DECISÃO (F6)
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    async def processar_decisao(self, decisao) -> dict:
+        """
+        Processa uma decisão humana do portal.
+
+        Args:
+            decisao: DecisaoHumana com ações por questão
+
+        Returns:
+            dict com status do processamento
+        """
+        logger.info(
+            "decisao_processando",
+            arquivo_id=decisao.arquivo_id,
+            total_questoes=len(decisao.questoes),
+        )
+
+        # Buscar arquivo
+        arquivo = self.supabase.buscar_arquivo(decisao.arquivo_id)
+        if not arquivo:
+            raise ValueError(f"Arquivo {decisao.arquivo_id} não encontrado")
+
+        aprovadas = []
+        rejeitadas = []
+        corrigidas = []
+
+        for q in decisao.questoes:
+            acao = q.get("acao", "aprovar")
+            numero = q.get("questao_numero")
+
+            if acao == "aprovar":
+                aprovadas.append(q)
+            elif acao == "rejeitar":
+                rejeitadas.append(q)
+            elif acao == "corrigir":
+                corrigidas.append(q)
+
+        # Se recusar o arquivo inteiro
+        if decisao.recusar:
+            self.supabase.atualizar_arquivo(
+                decisao.arquivo_id,
+                {
+                    "status": StatusArquivo.RECUSADO.value,
+                    "observacoes": decisao.motivo_recusa or "Recusado via portal",
+                },
+            )
+            return {
+                "arquivo_id": decisao.arquivo_id,
+                "status": "recusado",
+                "motivo": decisao.motivo_recusa,
+                "questoes_afetadas": len(decisao.questoes),
+            }
+
+        # Se há questões aprovadas/corrigidas → importar
+        todas_questoes = aprovadas + corrigidas
+        if todas_questoes:
+            try:
+                payload_import = {
+                    "banca_id": decisao.banca_id,
+                    "instituicao_id": decisao.instituicao_id,
+                    "cargo_id": decisao.cargo_id,
+                    "ano": decisao.ano,
+                    "questoes": [
+                        {
+                            "numero": q.get("questao_numero"),
+                            "enunciado": q.get("enunciado", ""),
+                            "alternativas": q.get("alternativas", []),
+                            "gabarito": q.get("gabarito_resposta"),
+                            "disciplina_id": q.get("disciplina_id"),
+                            "assunto_id": q.get("assunto_id"),
+                        }
+                        for q in todas_questoes
+                    ],
+                }
+
+                resultado = await self.api.importar_questoes(payload_import)
+                logger.info(
+                    "decisao_importada",
+                    arquivo_id=decisao.arquivo_id,
+                    aprovadas=len(aprovadas),
+                    corrigidas=len(corrigidas),
+                )
+
+                # Atualizar status do arquivo
+                self.supabase.atualizar_arquivo(
+                    decisao.arquivo_id,
+                    {
+                        "status": StatusArquivo.IMPORTADO.value,
+                        "metadata": {
+                            "decisao": {
+                                "aprovadas": len(aprovadas),
+                                "corrigidas": len(corrigidas),
+                                "rejeitadas": len(rejeitadas),
+                            }
+                        },
+                    },
+                )
+
+                return {
+                    "arquivo_id": decisao.arquivo_id,
+                    "status": "importado",
+                    "aprovadas": len(aprovadas),
+                    "corrigidas": len(corrigidas),
+                    "rejeitadas": len(rejeitadas),
+                }
+
+            except Exception as e:
+                logger.error("decisao_erro_importacao", arquivo_id=decisao.arquivo_id, erro=str(e))
+                return {
+                    "arquivo_id": decisao.arquivo_id,
+                    "status": "erro",
+                    "erro": str(e),
+                }
+
+        return {
+            "arquivo_id": decisao.arquivo_id,
+            "status": "sem_questoes",
+        }
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # ETAPA 6: IMPORTAÇÃO (WF3)
     # ═══════════════════════════════════════════════════════════════════════════
 
     async def _importar_questoes(self, payload: PayloadETAPA2) -> dict:

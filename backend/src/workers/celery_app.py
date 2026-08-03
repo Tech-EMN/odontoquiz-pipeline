@@ -17,7 +17,7 @@ def create_celery() -> Celery:
         "odontoquiz",
         broker=broker,
         backend=backend,
-        include=["backend.src.workers.tasks"],
+        include=["backend.src.workers.tasks", "backend.src.workers.decisao_tasks"],
     )
 
     app.conf.update(

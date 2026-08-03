@@ -1,120 +1,162 @@
 # OdontoQuiz Pipeline
 
-Pipeline de processamento de materiais de concurso odontológico — migração dos workflows n8n para Python (FastAPI + Supabase + OpenAI).
+Pipeline de processamento de materiais de concurso odontológico — migração dos workflows n8n para Python (FastAPI + Supabase + OpenAI + Celery).
+
+**Fases concluídas:** F0 ✓ F1 ✓ F2 ✓ F3 ✓ F4 ✓ F5 ✓ F6 ✓ F7 ✓ F8 ✓ F9 ✓ F10 ✓
+
+## Estrutura do Monorepo
+
+```
+odontoquiz-pipeline/
+├── .github/
+│   └── workflows/ci.yml       # CI/CD (F9)
+├── backend/
+│   ├── src/
+│   │   ├── main.py            # FastAPI — 6 endpoints
+│   │   ├── core/
+│   │   │   ├── config.py      # pydantic-settings
+│   │   │   ├── pipeline.py    # Pipeline principal (7 etapas)
+│   │   │   └── logging.py     # structlog + trace_id (F4)
+│   │   ├── models/
+│   │   │   └── schemas.py     # Pydantic models
+│   │   ├── services/
+│   │   │   ├── supabase.py     # DB + Storage
+│   │   │   ├── openai_client.py
+│   │   │   ├── odontoquiz_api.py
+│   │   │   └── discipline_cache.py
+│   │   ├── workers/
+│   │   │   ├── celery_app.py   # Celery config (F2)
+│   │   │   ├── tasks.py        # Pipeline tasks
+│   │   │   └── decisao_tasks.py # Portal decisions (F6)
+│   │   └── utils/
+│   │       └── file_utils.py
+│   ├── tests/
+│   │   ├── conftest.py         # Fixtures (F5)
+│   │   └── test_pipeline.py    # Unit tests (F5)
+│   ├── migrations/             # Alembic (F3)
+│   │   ├── env.py
+│   │   └── versions/
+│   │       └── 7d9590245845_initial_schema.py
+│   ├── alembic.ini
+│   ├── Dockerfile              # Multi-purpose (F2)
+│   ├── docker-compose.yml      # Dev env: redis + api + worker + flower (F2)
+│   ├── requirements.txt
+│   └── RAILWAY.md              # Deploy guide (F8)
+├── frontend/
+│   └── README.md               # Placeholder (export Lovable pendente)
+├── railway.toml
+└── README.md
+```
 
 ## Arquitetura
 
 ```
-┌─────────────┐     ┌──────────────────┐     ┌──────────────┐
-│  Lovable     │────▶│  FastAPI (Railway)│────▶│  Supabase     │
-│  (Frontend)  │     │  /mcp/ingestao   │     │  (DB+Storage) │
-└─────────────┘     │  /portal/decisao  │     └──────────────┘
-                    └────────┬─────────┘
-                             │
-                    ┌────────▼─────────┐     ┌──────────────┐
-                    │  GPT-4o (OpenAI)  │────▶│  OdontoQuiz   │
-                    │  Análise Imagem   │     │  API (Import) │
-                    └──────────────────┘     └──────────────┘
+POST /mcp/ingestao  ──▶  200 OK <1s   ──▶  Celery Task (Redis)
+        │                                        │
+        │                                   ┌────▼────────────┐
+        │                                   │  OCR Leve (WF1)  │
+        │                                   │  Classificação   │
+        │                                   └────┬────────────┘
+        │                                   ┌────▼────────────┐
+        │                                   │  Pareamento      │
+        │                                   │  Prova↔Gabarito  │
+        │                                   └────┬────────────┘
+        │                                   ┌────▼────────────┐
+        │                                   │  ETAPA 2 (WF2)   │
+        │                                   │  Extração + IA   │
+        │                                   └────┬────────────┘
+        │                                        │
+   GET /tasks/{id}/status ◀── Progress ─────────┘
+        │
+   POST /portal/decisao  ──▶  Import OdontoQuiz
 ```
-
-## Workflows Migrados
-
-| n8n | Python | Função |
-|-----|--------|--------|
-| WF1 | `OCRLevePipeline._ocr_leve()` | Classifica documento (prova/gabarito) |
-| WF2 | `Etapa2Pipeline._etapa2_ocr()` | Extrai questões, gabarito, disciplinas |
-| WF3 | `/portal/decisao` + `_importar_questoes()` | Portal de decisão + importação |
-| WF4 | `/mcp/ingestao-materiais` | Ingestão de arquivos |
-
-## Correções Aplicadas
-
-Todas as 10 correções do handoff de 28/07 estão incorporadas:
-
-| # | Correção | Implementação |
-|---|----------|---------------|
-| 1 | try/catch | `try/except` em todas as chamadas OpenAI |
-| 2 | Fallback disciplinas | `_buscar_disciplinas_com_fallback()` |
-| 3 | Mapear IDs | `_montar_payload_etapa2()` — fuzzy match |
-| 4 | Remover hardcoded | Validação explícita sem IDs mágicos |
-| 5 | Validar erro Analyze | `if resultado.get("error")` antes de processar |
-| 6 | parseJsonSeguro | Contador `{`/`}` no lugar de regex greedy |
-| 7 | Encoding | UTF-8 nativo do Python |
-| 8 | deduplicarQuestoes | Score por `confianca_extracao * 200` |
-| 9 | Validar schema | `len(alternativas) < 2` → skip |
-| 10 | Credential | Service Role Key no `.env`, nunca em plain-text |
 
 ## Setup
 
 ```bash
 # 1. Clone
-git clone <repo>
+git clone https://github.com/Tech-EMN/odontoquiz-pipeline
 cd odontoquiz-pipeline
 
-# 2. Configure o ambiente
-cp .env.example .env
-# Edite .env com suas keys
+# 2. Ambiente
+cp backend/.env.example backend/.env
+# Edite backend/.env com suas keys
 
-# 3. Instale
+# 3. Dependências
+cd backend
 pip install -r requirements.txt
 
-# 4. Rode
-uvicorn src.main:app --reload --port 8000
+# 4. Redis (necessário para Celery F2)
+# Opção A: Docker
+docker compose up redis -d
+
+# Opção B: Redis local
+redis-server
+
+# 5. Migrations (F3)
+DATABASE_URL="postgresql://..." alembic upgrade head
+
+# 6. API
+uvicorn backend.src.main:app --reload --port 8000
+
+# 7. Worker (outro terminal)
+celery -A backend.src.workers.celery_app worker --loglevel=info -c 2
 ```
 
-## Deploy no Railway
+## Deploy (Railway — F8)
 
-```bash
-# 1. Instale o Railway CLI
-npm i -g @railway/cli
+Ver [backend/RAILWAY.md](backend/RAILWAY.md) para guia completo.
 
-# 2. Login
-railway login
-
-# 3. Link ao projeto
-railway link
-
-# 4. Configure as variáveis
-railway variables set \
-  SUPABASE_URL=https://ywydkdehygqcumgjefya.supabase.co \
-  SUPABASE_SERVICE_ROLE_KEY=sua_key \
-  OPENAI_API_KEY=sk-sua_key \
-  ODONTOQUIZ_API_KEY=sua_key \
-  WEBHOOK_TOKEN=seu_token
-
-# 5. Deploy
-railway up
-```
+**Serviços:**
+| Serviço | Start Command |
+|---------|--------------|
+| `api` | `uvicorn backend.src.main:app --host 0.0.0.0 --port ${PORT}` |
+| `worker` | `celery -A backend.src.workers.celery_app worker --loglevel=info -c 2` |
+| `flower` | `celery -A backend.src.workers.celery_app flower --port=${PORT}` |
 
 ## API Endpoints
 
-| Método | Path | Descrição |
-|--------|------|-----------|
-| `GET` | `/` | Healthcheck |
-| `GET` | `/health` | Healthcheck detalhado |
-| `POST` | `/mcp/ingestao-materiais` | Ingestão de lote (WF4) |
-| `POST` | `/portal/decisao` | Decisão do portal (WF3) |
-| `GET` | `/lotes/{id}/status` | Status do lote |
-| `GET` | `/lotes/{id}/arquivos/{id}` | Resultado do arquivo |
+| Método | Path | Descrição | Fase |
+|--------|------|-----------|------|
+| `GET` | `/` | Healthcheck | — |
+| `GET` | `/health` | Healthcheck detalhado | — |
+| `POST` | `/mcp/ingestao-materiais` | Ingestão JSON (WF4) | — |
+| `POST` | `/mcp/ingestao-upload` | Upload multipart | — |
+| `POST` | `/portal/decisao` | Decisão portal (F6) | F6 |
+| `GET` | `/tasks/{id}/status` | Status Celery task (F2) | F2 |
+| `GET` | `/lotes/{id}/status` | Status lote + progresso (F7) | F7 |
+| `GET` | `/lotes/{id}/arquivos/{id}` | Resultado arquivo | — |
 
-## Testes
+## Observabilidade (F4)
+
+- **structlog** — JSON estruturado em produção
+- **trace_id** — UUID único por requisição (header `X-Trace-ID`)
+- **lote_id** — Rastreabilidade por lote em todos os logs
+
+```json
+{"event":"request","method":"POST","path":"/mcp/ingestao-materiais","status":200,"duration_ms":45,"trace_id":"a1b2c3d4e5f6","timestamp":"2026-08-03T21:00:00.000Z"}
+```
+
+## Testes (F5)
 
 ```bash
-# Enviar um lote de teste
-curl -X POST http://localhost:8000/mcp/ingestao-materiais \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer seu_token" \
-  -d '{
-    "arquivos": [
-      {
-        "nome_original": "gabarito_oficial.jpg",
-        "storage_path": "lotes/test/originais/gabarito.jpg",
-        "tipo_hint": "gabarito"
-      },
-      {
-        "nome_original": "prova_tipo1.jpg",
-        "storage_path": "lotes/test/originais/prova_tipo1.jpg",
-        "tipo_hint": "prova"
-      }
-    ]
-  }'
+cd backend
+pytest tests/ -v --cov=src --cov-report=term-missing
 ```
+
+## CI/CD (F9)
+
+Push para `main` dispara:
+1. **Test** — pytest + coverage
+2. **Lint** — Ruff (W, E, F)
+3. **Migration check** — Alembic dry-run (upgrade + downgrade)
+4. **Deploy** — Railway push-to-deploy automático
+
+## Workflows Migrados
+
+| n8n | Python | Função |
+|-----|--------|--------|
+| WF1 | `_ocr_leve()` | Classificar documento (prova/gabarito) |
+| WF2 | `_etapa2_ocr()` | Extrair questões, gabarito, disciplinas |
+| WF3 | `/portal/decisao` + `processar_decisao()` | Decisão + importação (F6) |
+| WF4 | `/mcp/ingestao-materiais` | Ingestão + dedup + dispatcher Celery (F0/F2) |

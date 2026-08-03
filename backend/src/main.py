@@ -7,16 +7,17 @@ import logging
 import os
 import sys
 import tempfile
+import uuid
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Header, Request, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel
+from fastapi.responses import JSONResponse
 
 from .core.config import get_settings
 from .core.pipeline import get_pipeline
+from .core.logging import setup_logging, get_logger, set_trace_id, set_lote_id, clear_context
 from .models.schemas import (
     PayloadIngestao,
     PayloadDecisao,
@@ -30,32 +31,32 @@ from .models.schemas import (
 try:
     from .workers.celery_app import celery_app
     CELERY_AVAILABLE = True
-    logger_early = logging.getLogger("odontoquiz")
-    logger_early.info("✅ Celery worker disponível — pipeline assíncrono")
 except Exception as e:
     CELERY_AVAILABLE = False
-    import warnings
-    warnings.warn(f"⚠️ Celery não disponível: {e}. Pipeline rodará síncrono.")
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
 
 settings = get_settings()
-logging.basicConfig(
-    level=getattr(logging, settings.log_level.upper(), logging.INFO),
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    stream=sys.stdout,
+setup_logging(
+    log_level=settings.log_level,
+    json_output=not settings.debug,  # JSON em produção, console em dev
 )
-logger = logging.getLogger("odontoquiz")
+logger = get_logger("odontoquiz.api")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Inicialização e shutdown da aplicação."""
-    logger.info(f"🚀 {settings.app_name} v{settings.app_version} iniciando...")
-    logger.info(f"   OdontoQuiz API: {settings.odontoquiz_api_base_url}")
-    logger.info(f"   Supabase: {settings.supabase_url}")
+    logger.info(
+        "app_starting",
+        app=settings.app_name,
+        version=settings.app_version,
+        odontoquiz_api=settings.odontoquiz_api_base_url,
+    )
+    if not CELERY_AVAILABLE:
+        logger.warning("celery_unavailable", fallback="asyncio")
     yield
-    logger.info("👋 OdontoQuiz Pipeline encerrado.")
+    logger.info("app_shutdown")
 
 
 app = FastAPI(
@@ -79,12 +80,25 @@ app.add_middleware(
 # ─── Middleware ────────────────────────────────────────────────────────────────
 
 @app.middleware("http")
-async def log_requests(request: Request, call_next):
-    """Log de todas as requisições."""
+async def trace_context_middleware(request: Request, call_next):
+    """Middleware que injeta trace_id em todas as requisições (F4)."""
+    tid = request.headers.get("X-Trace-ID") or str(uuid.uuid4())[:12]
+    set_trace_id(tid)
+
     start = __import__("time").time()
     response = await call_next(request)
     duration = __import__("time").time() - start
-    logger.info(f"{request.method} {request.url.path} → {response.status_code} ({duration:.3f}s)")
+
+    logger.info(
+        "request",
+        method=request.method,
+        path=request.url.path,
+        status=response.status_code,
+        duration_ms=round(duration * 1000),
+    )
+
+    response.headers["X-Trace-ID"] = tid
+    clear_context()
     return response
 
 
@@ -348,11 +362,42 @@ async def portal_decisao(
     """
     Webhook de decisão do portal (substitui WF3).
     Recebe a decisão humana sobre questões que precisam de revisão.
+
+    Ações por questão:
+      - aprovar: confirma disciplina/assunto/gabarito e importa
+      - corrigir: atualiza metadados e importa com correções
+      - rejeitar: marca questão como recusada (precisa reupload)
     """
     validar_token(authorization)
+    pipeline = get_pipeline()
 
-    # TODO: implementar lógica completa de decisão
-    return {"status": "recebido", "decisoes": len(payload.decisoes)}
+    resultados = []
+    for decisao in payload.decisoes:
+        try:
+            if CELERY_AVAILABLE:
+                from .workers.decisao_tasks import processar_decisao_task
+                task = processar_decisao_task.delay(decisao.model_dump())
+                resultados.append({
+                    "arquivo_id": decisao.arquivo_id,
+                    "status": "enfileirado",
+                    "task_id": task.id,
+                })
+            else:
+                resultado = await pipeline.processar_decisao(decisao)
+                resultados.append(resultado)
+        except Exception as e:
+            logger.error("decisao_erro", arquivo_id=decisao.arquivo_id, erro=str(e))
+            resultados.append({
+                "arquivo_id": decisao.arquivo_id,
+                "status": "erro",
+                "erro": str(e),
+            })
+
+    return {
+        "status": "processado",
+        "total_decisoes": len(payload.decisoes),
+        "resultados": resultados,
+    }
 
 
 @app.get("/lotes/{lote_id}/status", response_model=StatusResponse)
