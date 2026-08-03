@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     celery_broker_url: str = ""  # Defaults to redis_url if empty
     celery_result_backend: str = ""  # Defaults to redis_url if empty
 
+    # -- Database (F3) --
+    database_url: str = ""  # Supabase connection pooler URL for Alembic
+
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",
