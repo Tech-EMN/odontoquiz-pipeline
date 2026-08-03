@@ -1,0 +1,8 @@
+[build]
+builder = "NIXPACKS"
+# Deixe o Nixpacks auto-detectar: ele cria venv + pip install -r requirements.txt automaticamente
+
+[deploy]
+startCommand = "uvicorn src.main:app --host 0.0.0.0 --port ${PORT}"
+healthcheckPath = "/health"
+restartPolicyMaxRetries = 5

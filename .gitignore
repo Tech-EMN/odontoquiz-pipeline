@@ -23,6 +23,13 @@ build/
 .DS_Store
 Thumbs.db
 
+# Frontend (Lovable export)
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+frontend/.env.local
+
 # Temp
 *.tmp
 *.log
+_correcoes/
